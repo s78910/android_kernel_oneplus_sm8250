@@ -56,4 +56,23 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OnePlus8T-SukiSU-Kernel
-          path: AnyKernel3/* 
+          path: AnyKernel3/*
+
+      - name: Force fix rstrip in gcc-wrapper.py with python
+        run: |
+          cat > fix_rstrip.py <<'EOF'
+import sys
+for path in sys.argv[1:]:
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    with open(path, 'w', encoding='utf-8') as f:
+        for line in lines:
+            if 'line = line.rstrip' in line:
+                f.write('line = line.rstrip(b\'\n\') if isinstance(line, bytes) else line.rstrip(\'\n\')\n')
+            else:
+                f.write(line)
+EOF
+          find . -name gcc-wrapper.py | while read file; do
+            python3 fix_rstrip.py "$file"
+          done
+          find . -name gcc-wrapper.py -exec grep "rstrip" {} + 
