@@ -22,6 +22,11 @@ on:
         description: "是否启用手动钩子(VFS)？"
         required: true
         default: true
+      KPM:
+        type: boolean
+        description: "是否启用内核模块(KPM)？"
+        required: true
+        default: true
 
 jobs:
   build:
@@ -48,9 +53,11 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: OnePlusOSS/android_kernel_oneplus_sm8250
-        ref: android12-4.19-stable  # 使用确认存在的分支
+        # 使用确认存在的分支
+        ref: oneplus/sm8250_t_13.1
         path: kernel_workspace
         submodules: recursive
+        fetch-depth: 1
 
     - name: Create swap file
       run: |
@@ -64,7 +71,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt update -y
-        sudo apt install -y python3 git curl ccache jq gcc-aarch64-linux-gnu binutils make flex bison
+        sudo apt install -y python3 git curl ccache jq gcc-aarch64-linux-gnu binutils make flex bison libelf-dev
 
     - name: Set up ccache
       uses: actions/cache@v3
@@ -73,6 +80,11 @@ jobs:
         key: ccache-${{ runner.os }}-${{ github.ref }}
         restore-keys: |
           ccache-${{ runner.os }}-
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
 
     # 添加 SukiSU Ultra
     - name: Add SukiSU Ultra
@@ -90,7 +102,7 @@ jobs:
       run: |
         cd kernel_workspace
         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-4.19
-        cp -r susfs4ksu/kernel_patches/fs/* kernel/fs/
+        cp -r susfs4ksu/kernel_patches/fs/* fs/
         cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
         patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-4.19.patch || true
 
@@ -122,21 +134,30 @@ jobs:
             echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
         fi
 
+    # 下载 Clang 工具链
+    - name: Download Clang
+      run: |
+        git clone https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone -b 17 --depth=1 clang-17
+        mv clang-17/clang-r487747c kernel_workspace/clang
+
     # 编译内核
     - name: Build Kernel
       run: |
         cd kernel_workspace
-        export PATH=${{ github.workspace }}/clang/bin:$PATH
-        make ${{ env.KERNEL_CMDLINE }} ${{ env.KERNEL_DEFCONFIG }}
-        make ${{ env.KERNEL_CMDLINE }} -j$(nproc --all)
+        export PATH=$(pwd)/clang/bin:$PATH
+        make LLVM=1 ${{ env.KERNEL_CMDLINE }} ${{ env.KERNEL_DEFCONFIG }}
+        make LLVM=1 ${{ env.KERNEL_CMDLINE }} -j$(nproc --all)
 
     # 准备 AnyKernel3
     - name: Prepare AnyKernel3
       run: |
         git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+        rm -rf ./AnyKernel3/.git
+        
+        # 复制内核镜像
         cp kernel_workspace/out/arch/arm64/boot/Image.gz AnyKernel3/
 
-    # 下载 SUSFS 模块 (CI方式)
+    # 下载 SUSFS 模块（使用 CI 方式）
     - name: Download SUSFS Module (CI)
       if: ${{ inputs.SUSFS_CI == 'CI' }}
       run: |
@@ -144,11 +165,13 @@ jobs:
         
         # 从 CI 下载最新构建的 SUSFS 模块
         LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs" | \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
           jq -r '.workflow_runs[0].id')
         
+        ARTIFACT_URL="https://github.com/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts"
+        
         curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          "https://github.com/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" -o susfs_module.zip
+          "$ARTIFACT_URL" -o susfs_module.zip
 
     # 上传成品
     - name: Upload Kernel
