@@ -27,7 +27,8 @@ jobs:
 
       - name: Fix python2/3 bytes-str rstrip in gcc-wrapper.py
         run: |
-          find . -name gcc-wrapper.py -exec sed -i "s/line = line.rstrip('\\n')/line = line.rstrip(b'\\n') if isinstance(line, bytes) else line.rstrip('\\n')/" {} +
+          find . -name gcc-wrapper.py -exec sed -i "s/line *= *line.rstrip('\\n')/line = line.rstrip(b'\\n') if isinstance(line, bytes) else line.rstrip('\\n')/" {} +
+          find . -name gcc-wrapper.py -exec grep "rstrip" {} +
 
       - name: Integrate SukiSU (with susfs)
         run: |
