@@ -1,145 +1,76 @@
-name: Build OnePlus_SukiSU Ultra All
+name: Build OnePluss-Sm8250-Kernel
 on:
   workflow_dispatch:
-    inputs:
-      # ...（保持输入参数不变）
-      # 移除KPM和ZRAM选项（不再需要）
-      # 保留其他选项
+  schedule:
+      # Run once a week on Sunday at midnight. See http://crontab.guru
+      - cron: '0 21 1 * *'
+  push:
+    branches:
+      - HEAD
+  pull_request:
+      branches:
+      - HEAD
 
 jobs:
-  get-config:
-    # ...（保持不变）
-
   build:
-    # ...（环境变量保持不变）
-    
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_HARDLINK: "true"
+      KERNEL_DEFCONFIG: "vendor/kona-perf_defconfig"
+      KERNEL_CMDLINE: "ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 O=out"
     steps:
-      ## === 删除不需要的步骤 ===
-      # 移除ZRAM相关步骤
-      # - name: Apply ZRAM
-      # 移除KPM相关步骤
-      # - name: Apply patch_linux and replace Image
-      # 移除风驰内核支持
-      # - name: Add sched_ext
-      # 移除GKI专用优化
-      # - name: Enable lto=thin For FAST
-      # 移除ZRAM下载
-      # - name: Download And Unzip ZRAM
-      # - name: Upload ZRAM Module
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        submodules: 'true'
+        fetch-depth: 100
 
-      ## === 保留SUSFS集成 ===
-      # 添加SukiSU Ultra
-      - name: Add KernelSU-SukiSU Ultra
-        run: |
-          cd kernel_workspace/kernel_platform
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-          cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10700)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          export KSU_VERSION=$KSU_VERSION
-          sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+    - name: Set up ccache
+      uses: hendrikmuhs/ccache-action@v1.2
 
-      # 应用SUSFS补丁
-      - name: Apply Patches SukiSU Ultra
-        run: |
-          cd kernel_workspace
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}
-          cd kernel_platform
-          echo "正在打susfs补丁"
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}.patch ./common/
-          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+    - name: Install dependencies
+      run: |
+        sudo apt-get update -y 
+        sudo apt install gcc-aarch64-linux-gnu -y
+        sudo apt install gcc-arm-linux-gnueabi -y
+        sudo apt install binutils make python3 libssl-dev build-essential bc  bison flex unzip libssl-dev ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs -y
+        git clone https://codeberg.org/Mandi-Sa/clang --dept=1 -b amd64-kernel-arm
+        git clone https://github.com/lateautumn233/AnyKernel3 -b master --depth=1
+        rm -rf AnyKernel3/.git
+    
+    - name: GetTime
+      id: get_time
+      run: |
+        echo "TIME=$(TZ=UTC-8 date +%m%d%H%M )" >> $GITHUB_OUTPUT
 
-          cd ./common
-          KERNEL_VERSION="${{ needs.get-config.outputs.KERNEL_VERSION }}"
-          feil="${{ github.event.inputs.FEIL }}"
-          TRUSTY_EXISTS="false"
-          if [[ "$KERNEL_VERSION" == "6.6" ]]; then
-            if grep -qr 'common-modules/trusty' "$GITHUB_WORKSPACE/.repo/manifests_fallback/${feil}.xml"; then
-              TRUSTY_EXISTS="true"
-            fi
-            echo "trusty_exists=$TRUSTY_EXISTS" >> $GITHUB_OUTPUT
+    - name: Build Kernel
+      run: |
+       export PATH=$(pwd)/clang/bin/:$PATH
+       export ARCH=arm64
+       export SUBARCH=arm64
+       make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang"
+       make $KERNEL_CMDLINE CC="ccache clang" -j$(nproc --all)
+       cp out/arch/arm64/boot/Image.gz AnyKernel3
 
-            if [[ "$TRUSTY_EXISTS" == "false" ]]; then
-              echo "修复内核版本6.6部分机型susfs的问题"
-              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${KERNEL_VERSION}.patch
-              sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${KERNEL_VERSION}.patch
-            fi
-          fi
-          patch -p1 < 50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}.patch || true
-          echo "susfs_patch完成"
+    - name: Upload Kernel
+      uses: actions/upload-artifact@v3
+      with:
+        name: Qiuqiu-kernel-${{ steps.get_time.outputs.TIME }}
+        path: "AnyKernel3/*"
 
-      # 简化配置设置
-      - name: Add Configuration Settings
-        run: |
-          cd kernel_workspace/kernel_platform
-          CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
-          KERNEL_VERSION="${{ needs.get-config.outputs.KERNEL_VERSION }}"
+    - name: Build Kernel-SU
+      run: |
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+        export PATH=$(pwd)/clang/bin/:$PATH
+        make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang"
+        make $KERNEL_CMDLINE CC="ccache clang" -j$(nproc --all)
+        cp out/arch/arm64/boot/Image.gz AnyKernel3
 
-          # SukiSU Ultra核心配置
-          echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-          
-          # VFS配置
-          if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
-          else
-            echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
-          fi
-
-          # SUSFS配置
-          if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
-            echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
-          fi
-          
-          # 移除构建校验
-          sed -i 's/check_defconfig//' ./common/build.config.gki
-
-      # 构建内核（简化版）
-      - name: Build Kernel
-        if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
-        run: |
-          # ...（保留构建逻辑，移除优化相关部分）
-          cd kernel_workspace/kernel_platform/common
-          make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
-          make -j$(nproc --all) O=out $MAKE_ARGS
-
-      - name: Fallback Build Kernel
-        if: ${{ github.event.inputs.FAST_BUILD == 'false' }}
-        run: |
-          cd kernel_workspace
-          ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ needs.get-config.outputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
-          
-      ## === SUSFS模块处理 ===
-      # 下载SUSFS模块（CI）
-      - name: Download Latest SUSFS Module from CI
-        if: ${{ github.event.inputs.SUSFS_CI == 'CI' }}
-        continue-on-error: true
-        run: |
-          # ...（保持原有逻辑）
-          
-      # 下载SUSFS模块（Release）
-      - name: Download Latest SUSFS Module from Release
-        if: ${{ github.event.inputs.SUSFS_CI == 'Release' }}
-        continue-on-error: true
-        run: |
-          wget -O ksu_module_susfs_1.5.2+_Release.zip https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip
-          cp ksu_module_susfs_1.5.2+_Release.zip ./AnyKernel3/
-
-      # 简化zip后缀
-      - name: Set zip suffix
-        id: suffix
-        run: |
-          echo "value=${{ github.event.inputs.VFS == 'true' && '_VFS' || '' }}" >> $GITHUB_OUTPUT
-
-      # 上传最终包
-      - name: Upload AnyKernel3
-        uses: actions/upload-artifact@v4
-        with:
-          name: AnyKernel3_SukiSUUltra_${{ env.KSUVER }}_${{ steps.feil_clean.outputs.value }}${{ steps.suffix.outputs.value }}
-          path: ./AnyKernel3/*
+    - name: Upload Kernel-SU
+      uses: actions/upload-artifact@v3
+      with:
+        name: Qiuqiu-kernel-SU-${{ steps.get_time.outputs.TIME }}
+        path: "AnyKernel3/*"
