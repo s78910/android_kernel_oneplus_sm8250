@@ -1,4 +1,4 @@
-name: Build OnePlus 8T (sm8250) SukiSU Kernel - Android 13 (4.19)
+name: Build OnePlus 8T SukiSU Kernel (Android 13, 4.19)
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ on:
         default: ""
       VFS:
         type: boolean
-        description: "是否启用手动钩子(VFS)？推荐开启"
+        description: "是否启用手动钩子(VFS)？"
         required: true
         default: true
 
@@ -29,34 +29,33 @@ jobs:
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
-      CCACHE_MAXSIZE: "3G"
       CCACHE_HARDLINK: "true"
-      KERNEL_DEFCONFIG: "vendor/kona-perf_defconfig"
-      KERNEL_CMDLINE: "ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 O=out"
+      CCACHE_MAXSIZE: 8G
       ANDROID_VERSION: "13"
       KERNEL_VERSION: "4.19"
       CPU: "sm8250"
       CPUD: "kona"
+      KERNEL_DEFCONFIG: "vendor/kona-perf_defconfig"
+      KERNEL_CMDLINE: "ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 O=out"
       
     steps:
-    - name: Clean workspace
+    - name: Create workspace
       run: |
         rm -rf kernel_workspace || true
-        sudo swapoff -a || true
-        rm -rf /swapfile || true
         mkdir kernel_workspace
         
-    - name: Checkout
+    - name: Checkout kernel source
       uses: actions/checkout@v4
-
-    - name: Configure Git
-      run: |
-        git config --global user.name "GitHub Actions"
-        git config --global user.email "actions@github.com"
+      with:
+        repository: OnePlusOSS/android_kernel_oneplus_sm8250
+        ref: android12-4.19-stable  # 使用确认存在的分支
+        path: kernel_workspace
+        submodules: recursive
 
     - name: Create swap file
       run: |
-        sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+        sudo swapoff -a || true
+        sudo fallocate -l 8G /swapfile
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
@@ -65,57 +64,35 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt update -y
-        sudo apt install -y python3 git curl ccache jq gcc-aarch64-linux-gnu binutils make
-        
-    # 确保repo工具正确安装
-    - name: Install repo tool
-      run: |
-        mkdir -p kernel_workspace
-        curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
-        chmod a+x /usr/local/bin/repo
-        repo --version || { echo "repo安装失败"; exit 1; }
-        
-    # 关键修复：使用正确的分支和manifest
-    - name: Initialize repo and sync
-      run: |
-        mkdir -p kernel_workspace
-        cd kernel_workspace
-        
-        # 修复点：使用正确的manifest文件
-        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b oneplus/sm8250/android13 -m oneplus_8t_android13_4.19.xml --depth=1
-        
-        repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
-        
-        # 修复配置文件问题
-        rm common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-        rm msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
-      
-    # 添加SukiSU Ultra
+        sudo apt install -y python3 git curl ccache jq gcc-aarch64-linux-gnu binutils make flex bison
+
+    - name: Set up ccache
+      uses: actions/cache@v3
+      with:
+        path: /home/runner/.ccache
+        key: ccache-${{ runner.os }}-${{ github.ref }}
+        restore-keys: |
+          ccache-${{ runner.os }}-
+
+    # 添加 SukiSU Ultra
     - name: Add SukiSU Ultra
       run: |
         cd kernel_workspace
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-        
-        # 计算KSU版本
         cd KernelSU
         KSU_VERSION=$(expr $(git rev-list --count HEAD) "+" 10700)
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
         sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
         cd ..
 
-    # 应用SUSFS补丁
+    # 应用 SUSFS 补丁
     - name: Apply SUSFS Patches
       run: |
         cd kernel_workspace
         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-4.19
-        cd kernel_platform
-        echo "应用SUSFS补丁..."
-        cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-4.19.patch ./common/
-        cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-        cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-        
-        cd ./common
-        patch -p1 < 50_add_susfs_in_gki-android13-4.19.patch || true
+        cp -r susfs4ksu/kernel_patches/fs/* kernel/fs/
+        cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
+        patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-4.19.patch || true
 
     # 应用手动钩子补丁
     - name: Apply Manual Hook Patch
@@ -123,20 +100,19 @@ jobs:
       run: |
         cd kernel_workspace
         git clone https://github.com/ShirkNeko/SukiSU_patch.git
-        cd kernel_platform/common
-        cp ../../../SukiSU_patch/hooks/syscall_hooks.patch ./
-        patch -p1 < syscall_hooks.patch || true
+        patch -p1 < SukiSU_patch/hooks/syscall_hooks.patch || true
 
     # 配置内核
     - name: Configure Kernel
       run: |
-        cd kernel_workspace/kernel_platform
-        CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
+        cd kernel_workspace
+        CONFIG_FILE=arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
         
-        # SukiSU核心配置
+        # SukiSU 核心配置
         echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+        echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
         
-        # VFS配置
+        # VFS 配置
         if [ "${{ inputs.VFS }}" = "true" ]; then
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
             echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
@@ -145,61 +121,38 @@ jobs:
         else
             echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
         fi
-        
-        # 移除构建校验
-        sed -i 's/check_defconfig//' ./common/build.config.gki
 
     # 编译内核
     - name: Build Kernel
       run: |
-        cd kernel_workspace/kernel_platform
-        export PATH=$PATH:$(pwd)/prebuilts/clang/host/linux-x86/clang-r416183b/bin
-        
-        # 设置内核后缀
-        if [ -z "${{ inputs.SUFFIX }}" ]; then
-            RANDOM_HASH=$(head -c 8 /dev/urandom | xxd -p)
-            SUFFIX="4.19-g${RANDOM_HASH}"
-        else
-            SUFFIX="${{ inputs.SUFFIX }}"
-        fi
-        
-        # 修改内核版本脚本
-        cd common/scripts
-        sed -i "s/res=\"\$res\"/res=\"\$res-$SUFFIX\"/" setlocalversion
-        cd ../..
-        
-        # 编译内核
-        make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang"
-        make $KERNEL_CMDLINE CC="ccache clang" -j$(nproc --all)
+        cd kernel_workspace
+        export PATH=${{ github.workspace }}/clang/bin:$PATH
+        make ${{ env.KERNEL_CMDLINE }} ${{ env.KERNEL_DEFCONFIG }}
+        make ${{ env.KERNEL_CMDLINE }} -j$(nproc --all)
 
-    # 准备AnyKernel3
+    # 准备 AnyKernel3
     - name: Prepare AnyKernel3
       run: |
         git clone https://github.com/Numbersf/AnyKernel3 --depth=1
-        rm -rf ./AnyKernel3/.git
-        
-        # 复制内核镜像
-        cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image.gz AnyKernel3/
+        cp kernel_workspace/out/arch/arm64/boot/Image.gz AnyKernel3/
 
-    # 下载SUSFS模块（使用CI方式）
+    # 下载 SUSFS 模块 (CI方式)
     - name: Download SUSFS Module (CI)
       if: ${{ inputs.SUSFS_CI == 'CI' }}
       run: |
         cd AnyKernel3
         
-        # 从CI下载最新构建的SUSFS模块
+        # 从 CI 下载最新构建的 SUSFS 模块
         LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs" | \
           jq -r '.workflow_runs[0].id')
         
-        ARTIFACT_URL="https://github.com/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts"
-        
         curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          "$ARTIFACT_URL" -o susfs_module.zip
+          "https://github.com/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" -o susfs_module.zip
 
     # 上传成品
     - name: Upload Kernel
       uses: actions/upload-artifact@v4
       with:
-        name: SukiSU-4.19-${{ env.KSUVER }}
+        name: SukiSU-8T-${{ env.KSUVER }}
         path: "AnyKernel3/*"
