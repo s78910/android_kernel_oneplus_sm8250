@@ -81,8 +81,8 @@ jobs:
         mkdir -p kernel_workspace
         cd kernel_workspace
         
-        # 使用8T专用的分支和manifest
-        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8250/OO13 -m oneplus_8t_android13.xml --depth=1
+        # 修复点：使用正确的manifest文件
+        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b oneplus/sm8250/android13 -m oneplus_8t_android13_4.19.xml --depth=1
         
         repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
         
@@ -93,7 +93,7 @@ jobs:
     # 添加SukiSU Ultra
     - name: Add SukiSU Ultra
       run: |
-        cd kernel_workspace/kernel_platform
+        cd kernel_workspace
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
         
         # 计算KSU版本
@@ -135,7 +135,6 @@ jobs:
         
         # SukiSU核心配置
         echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-        echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
         
         # VFS配置
         if [ "${{ inputs.VFS }}" = "true" ]; then
