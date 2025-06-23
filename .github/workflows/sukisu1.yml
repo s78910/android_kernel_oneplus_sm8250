@@ -20,20 +20,16 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils make python3 libssl-dev build-essential bc bison flex unzip ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs ccache
           git clone https://github.com/lateautumn233/AnyKernel3 -b master --depth=1
           rm -rf AnyKernel3/.git
-
       - name: Fix python2 print to python3
         run: |
           find . -name gcc-wrapper.py -exec sed -i "s/print \(.*\)$/print(\1)/" {} +
-
       - name: Fix python2/3 bytes-str rstrip in gcc-wrapper.py
         run: |
-          find . -name gcc-wrapper.py -exec sed -i "s/^[[:space:]]*line[[:space:]]*=[[:space:]]*line\.rstrip('\\n')[[:space:]]*$/line = line.rstrip(b'\\n') if isinstance(line, bytes) else line.rstrip('\\n')/" {} +
+          find . -name gcc-wrapper.py -exec sed -i -E "s/^([[:space:]]*)line[[:space:]]*=[[:space:]]*line\\.rstrip\('\\n'\)[[:space:]]*$/\1line = line.rstrip(b'\\n') if isinstance(line, bytes) else line.rstrip('\\n')/" {} +
           find . -name gcc-wrapper.py -exec grep "rstrip" {} +
-
       - name: Integrate SukiSU (with susfs)
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-
       - name: Disable LZ4K/LZ4KD and lkm
         run: |
           sed -i '/CONFIG_LZ4K/d' arch/arm64/configs/vendor/kona-perf_defconfig || true
@@ -43,7 +39,6 @@ jobs:
           echo 'CONFIG_LZ4K=n' >> arch/arm64/configs/vendor/kona-perf_defconfig
           echo 'CONFIG_LZ4KD=n' >> arch/arm64/configs/vendor/kona-perf_defconfig
           echo 'CONFIG_MODULES=n' >> arch/arm64/configs/vendor/kona-perf_defconfig
-
       - name: Build Kernel
         run: |
           export ARCH=arm64
@@ -51,28 +46,8 @@ jobs:
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/kona-perf_defconfig
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc --all)
           cp out/arch/arm64/boot/Image.gz AnyKernel3/
-
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
           name: OnePlus8T-SukiSU-Kernel
-          path: AnyKernel3/*
-
-      - name: Force fix rstrip in gcc-wrapper.py with python
-        run: |
-          cat > fix_rstrip.py <<'EOF'
-import sys
-for path in sys.argv[1:]:
-    with open(path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    with open(path, 'w', encoding='utf-8') as f:
-        for line in lines:
-            if 'line = line.rstrip' in line:
-                f.write('line = line.rstrip(b\'\n\') if isinstance(line, bytes) else line.rstrip(\'\n\')\n')
-            else:
-                f.write(line)
-EOF
-          find . -name gcc-wrapper.py | while read file; do
-            python3 fix_rstrip.py "$file"
-          done
-          find . -name gcc-wrapper.py -exec grep "rstrip" {} + 
+          path: AnyKernel3/* 
