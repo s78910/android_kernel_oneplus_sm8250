@@ -1,53 +1,197 @@
-      - name: Install dependencies
-        run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl ccache jq
+name: Build OnePlus_SukiSU Ultra (4.19)
 
-      # 新增：确保目录存在并安装 repo
-      - name: Install repo tool and setup workspace
-        run: |
-          # 确保内核工作空间目录存在
-          sudo mkdir -p kernel_workspace
-          sudo chown -R runner:runner kernel_workspace
-          
-          # 安装 repo 工具并验证
-          curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
-          chmod a+x /usr/local/bin/repo
-          repo --version || { echo "repo 安装失败"; exit 1; }
-          echo "repo 已成功安装"
+on:
+  workflow_dispatch:
+    inputs:
+      SUSFS_CI:
+        type: choice
+        description: "下载SUSFS模块方式"
+        required: true
+        default: Release
+        options:
+          - Release
+          - CI
+          - NoN
+      SUFFIX:
+        type: string
+        description: "自定义内核后缀 (留空则使用随机字符串)"
+        required: false
+        default: ""
+      VFS:
+        type: boolean
+        description: "是否启用手动钩子(VFS)？推荐开启"
+        required: true
+        default: true
 
-      - name: Restore ccache
-        uses: actions/cache@v3
-        with:
-          path: /home/runner/.ccache
-          key: ccache-${{ runner.os }}-${{ github.ref }}
-          restore-keys: |
-            ccache-${{ runner.os }}-
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "3G"
+      CCACHE_HARDLINK: "true"
+      KERNEL_DEFCONFIG: "vendor/kona-perf_defconfig"
+      KERNEL_CMDLINE: "ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 O=out"
+      ANDROID_VERSION: "13"  # 明确指定为安卓13
+      KERNEL_VERSION: "4.19" # 明确指定为4.19内核
+      
+    steps:
+    - name: Clean workspace
+      run: |
+        rm -rf kernel_workspace || true
+        sudo swapoff -a || true
+        rm -rf /swapfile || true
+        mkdir kernel_workspace
+        
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: 'true'
 
-      # 修复后的同步步骤
-      - name: Initialize repo and sync
-        run: |
-          # 确保目录存在
-          mkdir -p kernel_workspace
-          cd kernel_workspace
-          
-          # 显式设置 PATH 确保能找到 repo
-          export PATH="/usr/local/bin:$PATH"
-          echo "当前 PATH: $PATH"
-          repo --version || { echo "repo 命令未找到!"; exit 1; }
-          
-          # 同步源码
-          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ needs.get-config.outputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
-          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
-          
-          # 修复可能的配置文件问题
-          if [ -e kernel_platform/common/BUILD.bazel ]; then
-            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
-          fi
-          if [ -e kernel_platform/msm-kernel/BUILD.bazel ]; then
-            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/msm-kernel/BUILD.bazel
-          fi
-          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
 
-      # 后续所有步骤保持不变...
+    - name: Create swap file
+      run: |
+        sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
+    - name: Install dependencies
+      run: |
+        sudo apt update -y
+        sudo apt install -y python3 git curl ccache jq gcc-aarch64-linux-gnu binutils make
+        
+    # 修复点：确保repo命令正确安装
+    - name: Install repo tool
+      run: |
+        # 确保内核工作空间目录存在
+        mkdir -p kernel_workspace
+        
+        # 安装repo工具并验证
+        curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+        chmod a+x /usr/local/bin/repo
+        repo --version || { echo "repo安装失败"; exit 1; }
+        
+    # 修复点：确保目录存在再进入
+    - name: Initialize repo and sync
+      run: |
+        mkdir -p kernel_workspace  # 确保目录存在
+        cd kernel_workspace
+        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8250 -m oneplus_8t_android13_4.19.xml --depth=1
+        repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
+        
+        # 修复可能的配置文件问题
+        rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+        rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+      
+    - name: Add SukiSU Ultra
+      run: |
+        cd kernel_workspace/kernel_platform
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+        
+        # 计算KSU版本
+        cd KernelSU
+        KSU_VERSION=$(expr $(git rev-list --count HEAD) "+" 10700)
+        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+        sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+        cd ..
+
+    - name: Apply SUSFS Patches
+      run: |
+        cd kernel_workspace
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-4.19
+        cd kernel_platform
+        echo "应用SUSFS补丁..."
+        cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-4.19.patch ./common/
+        cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+        cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+        
+        cd ./common
+        patch -p1 < 50_add_susfs_in_gki-android13-4.19.patch || true
+
+    - name: Apply Manual Hook Patch
+      if: ${{ inputs.VFS == true }}
+      run: |
+        cd kernel_workspace
+        git clone https://github.com/ShirkNeko/SukiSU_patch.git
+        cd kernel_platform/common
+        cp ../../../SukiSU_patch/hooks/syscall_hooks.patch ./
+        patch -p1 < syscall_hooks.patch || true
+
+    - name: Configure Kernel
+      run: |
+        cd kernel_workspace/kernel_platform
+        CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
+        
+        # SukiSU核心配置
+        echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+        
+        # VFS配置
+        if [ "${{ inputs.VFS }}" = "true" ]; then
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+        else
+            echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
+        fi
+        
+        # 移除构建校验
+        sed -i 's/check_defconfig//' ./common/build.config.gki
+
+    - name: Build Kernel
+      run: |
+        cd kernel_workspace/kernel_platform
+        export PATH=$PATH:$(pwd)/prebuilts/clang/host/linux-x86/clang-r416183b/bin
+        
+        # 设置内核后缀
+        if [ -z "${{ inputs.SUFFIX }}" ]; then
+            RANDOM_HASH=$(head -c 8 /dev/urandom | xxd -p)
+            SUFFIX="4.19-g${RANDOM_HASH}"
+        else
+            SUFFIX="${{ inputs.SUFFIX }}"
+        fi
+        
+        # 修改内核版本脚本
+        cd common/scripts
+        sed -i "s/res=\"\$res\"/res=\"\$res-$SUFFIX\"/" setlocalversion
+        cd ../..
+        
+        # 编译内核
+        make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang"
+        make $KERNEL_CMDLINE CC="ccache clang" -j$(nproc --all)
+
+    - name: Prepare AnyKernel3
+      run: |
+        git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+        rm -rf ./AnyKernel3/.git
+        
+        # 复制内核镜像
+        cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image.gz AnyKernel3/
+
+    - name: Download SUSFS Module
+      if: ${{ inputs.SUSFS_CI != 'NoN' }}
+      run: |
+        cd AnyKernel3
+        
+        if [ "${{ inputs.SUSFS_CI }}" = "CI" ]; then
+            # 尝试从CI下载
+            LATEST_RUN_ID=$(curl -s https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs | jq -r '.workflow_runs[0].id')
+            curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                "https://github.com/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" -o susfs_module.zip
+        else
+            # 从Release下载
+            wget https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip -O susfs_module.zip
+        fi
+
+    - name: Upload Kernel
+      uses: actions/upload-artifact@v4
+      with:
+        name: SukiSU-4.19-${{ env.KSUVER }}
+        path: "AnyKernel3/*"
