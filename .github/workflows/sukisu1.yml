@@ -1,4 +1,4 @@
-name: Build OnePlus_SukiSU Ultra (4.19)
+name: Build OnePlus 8T (sm8250) Kernel - Android 13 (4.19)
 
 on:
   workflow_dispatch:
@@ -78,21 +78,24 @@ jobs:
         chmod a+x /usr/local/bin/repo
         repo --version || { echo "repo安装失败"; exit 1; }
         
-    # 修复点：确保目录存在再进入
+    # 修复点：确保目录存在再进入并使用正确的manifest
     - name: Initialize repo and sync
       run: |
         mkdir -p kernel_workspace  # 确保目录存在
         cd kernel_workspace
-        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8250 -m oneplus_8t_android13_4.19.xml --depth=1
+        
+        # 使用正确的manifest和分支
+        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8250/android13 -m oneplus_8t_android13.xml --depth=1
+        
         repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
         
-        # 修复可能的配置文件问题
-        rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-        rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+        # 修复配置文件问题
+        rm common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+        rm msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
       
     - name: Add SukiSU Ultra
       run: |
-        cd kernel_workspace/kernel_platform
+        cd kernel_workspace
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
         
         # 计算KSU版本
