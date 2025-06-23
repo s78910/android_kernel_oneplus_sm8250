@@ -18,7 +18,6 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils make python3 libssl-dev build-essential bc bison flex unzip ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs ccache
-          for i in 1 2 3 4 5; do git clone --depth=1 https://github.com/tiann/KernelSU-Clang clang && break || sleep 5; done
           git clone https://github.com/lateautumn233/AnyKernel3 -b master --depth=1
           rm -rf AnyKernel3/.git
 
@@ -38,11 +37,10 @@ jobs:
 
       - name: Build Kernel
         run: |
-          export PATH=$(pwd)/clang/bin/:$PATH
           export ARCH=arm64
           export SUBARCH=arm64
-          make vendor/kona-perf_defconfig CC="ccache clang"
-          make CC="ccache clang" -j$(nproc --all)
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/kona-perf_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc --all)
           cp out/arch/arm64/boot/Image.gz AnyKernel3/
 
       - name: Upload Kernel
