@@ -1,181 +1,52 @@
-name: Build OnePlus 8T SukiSU Kernel (Android 13, 4.19)
+name: Build OnePlus 8T Kernel with SukiSU
 
 on:
   workflow_dispatch:
-    inputs:
-      SUSFS_CI:
-        type: choice
-        description: "下载SUSFS模块方式"
-        required: true
-        default: CI
-        options:
-          - CI
-          - Release
-          - NoN
-      SUFFIX:
-        type: string
-        description: "自定义内核后缀 (留空则使用随机字符串)"
-        required: false
-        default: ""
-      VFS:
-        type: boolean
-        description: "是否启用手动钩子(VFS)？"
-        required: true
-        default: true
-      KPM:
-        type: boolean
-        description: "是否启用内核模块(KPM)？"
-        required: true
-        default: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
-      CCACHE_NOHASHDIR: "true"
-      CCACHE_HARDLINK: "true"
-      CCACHE_MAXSIZE: 8G
-      ANDROID_VERSION: "13"
-      KERNEL_VERSION: "4.19"
-      CPU: "sm8250"
-      CPUD: "kona"
-      KERNEL_DEFCONFIG: "vendor/kona-perf_defconfig"
-      KERNEL_CMDLINE: "ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 O=out"
-      
     steps:
-    - name: Create workspace
-      run: |
-        rm -rf kernel_workspace || true
-        mkdir kernel_workspace
-        
-    - name: Checkout kernel source
-      uses: actions/checkout@v4
-      with:
-        repository: OnePlusOSS/android_kernel_oneplus_sm8250
-        # 使用确认存在的分支
-        ref: oneplus/sm8250_t_13.1
-        path: kernel_workspace
-        submodules: recursive
-        fetch-depth: 1
+      - name: Checkout kernel source
+        uses: actions/checkout@v3
+        with:
+          repository: MYTHOSick/android_kernel_oneplus_sm8250
+          ref: oss13
+          fetch-depth: 1
 
-    - name: Create swap file
-      run: |
-        sudo swapoff -a || true
-        sudo fallocate -l 8G /swapfile
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
-        free -h
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils make python3 libssl-dev build-essential bc bison flex unzip ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs ccache
+          git clone https://codeberg.org/Mandi-Sa/clang --depth=1 -b amd64-kernel-arm
+          git clone https://github.com/lateautumn233/AnyKernel3 -b master --depth=1
+          rm -rf AnyKernel3/.git
 
-    - name: Install dependencies
-      run: |
-        sudo apt update -y
-        sudo apt install -y python3 git curl ccache jq gcc-aarch64-linux-gnu binutils make flex bison libelf-dev
+      - name: Integrate SukiSU (with susfs)
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
 
-    - name: Set up ccache
-      uses: actions/cache@v3
-      with:
-        path: /home/runner/.ccache
-        key: ccache-${{ runner.os }}-${{ github.ref }}
-        restore-keys: |
-          ccache-${{ runner.os }}-
+      - name: Disable LZ4K/LZ4KD and lkm
+        run: |
+          sed -i '/CONFIG_LZ4K/d' arch/arm64/configs/vendor/kona-perf_defconfig || true
+          sed -i '/CONFIG_LZ4KD/d' arch/arm64/configs/vendor/kona-perf_defconfig || true
+          sed -i '/CONFIG_MODULES/d' arch/arm64/configs/vendor/kona-perf_defconfig || true
+          echo '# 禁用LZ4K/LZ4KD和lkm' >> arch/arm64/configs/vendor/kona-perf_defconfig
+          echo 'CONFIG_LZ4K=n' >> arch/arm64/configs/vendor/kona-perf_defconfig
+          echo 'CONFIG_LZ4KD=n' >> arch/arm64/configs/vendor/kona-perf_defconfig
+          echo 'CONFIG_MODULES=n' >> arch/arm64/configs/vendor/kona-perf_defconfig
 
-    - name: Configure Git
-      run: |
-        git config --global user.name "GitHub Actions"
-        git config --global user.email "actions@github.com"
+      - name: Build Kernel
+        run: |
+          export PATH=$(pwd)/clang/bin/:$PATH
+          export ARCH=arm64
+          export SUBARCH=arm64
+          make vendor/kona-perf_defconfig CC="ccache clang"
+          make CC="ccache clang" -j$(nproc --all)
+          cp out/arch/arm64/boot/Image.gz AnyKernel3/
 
-    # 添加 SukiSU Ultra
-    - name: Add SukiSU Ultra
-      run: |
-        cd kernel_workspace
-        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-        cd KernelSU
-        KSU_VERSION=$(expr $(git rev-list --count HEAD) "+" 10700)
-        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-        sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
-        cd ..
-
-    # 应用 SUSFS 补丁
-    - name: Apply SUSFS Patches
-      run: |
-        cd kernel_workspace
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-4.19
-        cp -r susfs4ksu/kernel_patches/fs/* fs/
-        cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
-        patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-4.19.patch || true
-
-    # 应用手动钩子补丁
-    - name: Apply Manual Hook Patch
-      if: ${{ inputs.VFS == true }}
-      run: |
-        cd kernel_workspace
-        git clone https://github.com/ShirkNeko/SukiSU_patch.git
-        patch -p1 < SukiSU_patch/hooks/syscall_hooks.patch || true
-
-    # 配置内核
-    - name: Configure Kernel
-      run: |
-        cd kernel_workspace
-        CONFIG_FILE=arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
-        
-        # SukiSU 核心配置
-        echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-        echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
-        
-        # VFS 配置
-        if [ "${{ inputs.VFS }}" = "true" ]; then
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
-        else
-            echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
-        fi
-
-    # 下载 Clang 工具链
-    - name: Download Clang
-      run: |
-        git clone https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone -b 17 --depth=1 clang-17
-        mv clang-17/clang-r487747c kernel_workspace/clang
-
-    # 编译内核
-    - name: Build Kernel
-      run: |
-        cd kernel_workspace
-        export PATH=$(pwd)/clang/bin:$PATH
-        make LLVM=1 ${{ env.KERNEL_CMDLINE }} ${{ env.KERNEL_DEFCONFIG }}
-        make LLVM=1 ${{ env.KERNEL_CMDLINE }} -j$(nproc --all)
-
-    # 准备 AnyKernel3
-    - name: Prepare AnyKernel3
-      run: |
-        git clone https://github.com/Numbersf/AnyKernel3 --depth=1
-        rm -rf ./AnyKernel3/.git
-        
-        # 复制内核镜像
-        cp kernel_workspace/out/arch/arm64/boot/Image.gz AnyKernel3/
-
-    # 下载 SUSFS 模块（使用 CI 方式）
-    - name: Download SUSFS Module (CI)
-      if: ${{ inputs.SUSFS_CI == 'CI' }}
-      run: |
-        cd AnyKernel3
-        
-        # 从 CI 下载最新构建的 SUSFS 模块
-        LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
-          jq -r '.workflow_runs[0].id')
-        
-        ARTIFACT_URL="https://github.com/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts"
-        
-        curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          "$ARTIFACT_URL" -o susfs_module.zip
-
-    # 上传成品
-    - name: Upload Kernel
-      uses: actions/upload-artifact@v4
-      with:
-        name: SukiSU-8T-${{ env.KSUVER }}
-        path: "AnyKernel3/*"
+      - name: Upload Kernel
+        uses: actions/upload-artifact@v3
+        with:
+          name: OnePlus8T-SukiSU-Kernel
+          path: AnyKernel3/*
