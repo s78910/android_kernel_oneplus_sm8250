@@ -1,4 +1,5 @@
 name: Build OnePlus_SukiSU Ultra (4.19)
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,10 +7,9 @@ on:
         type: choice
         description: "配置文件"
         required: true
-        default: oneplus_8t_android13 # 示例配置
+        default: oneplus_8t_android13_4.19
         options:
-          - oneplus_8t_android13
-          - oneplus_9_pro_android13
+          - oneplus_8t_android13_4.19
       BUILD_METHOD:
         type: choice
         description: "编译方式"
@@ -20,74 +20,235 @@ on:
           - perf
       SUSFS_CI:
         type: choice
-        description: "SUSFS模块来源"
+        description: "下载SUSFS模块调用方式"
         required: true
         default: Release
         options:
           - CI
           - Release
+          - NoN
       SUFFIX:
         type: string
-        description: "自定义内核后缀"
+        description: "自定义内核后缀 (留空则使用随机字符串)"
         required: false
         default: ""
       VFS:
         type: boolean
-        description: "启用手动钩子(VFS)"
+        description: "是否启用手动钩子(VFS)？强烈建议启用"
         required: true
         default: true
 
 jobs:
   get-config:
-    uses: ./.github/workflows/feil-map.yml
-    with:
-      FEIL: ${{ inputs.FEIL }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    outputs:
+      CPU: ${{ steps.config.outputs.CPU }}
+      CPUD: ${{ steps.config.outputs.CPUD }}
+      ANDROID_VERSION: ${{ steps.config.outputs.ANDROID_VERSION }}
+      KERNEL_VERSION: ${{ steps.config.outputs.KERNEL_VERSION }}
+    steps:
+      - name: Map FEIL to config
+        id: config
+        run: |
+          case "${{ inputs.FEIL }}" in
+            oneplus_8t_android13_4.19)
+              echo "CPU=sm8250" >> $GITHUB_OUTPUT
+              echo "CPUD=kona" >> $GITHUB_OUTPUT
+              echo "ANDROID_VERSION=13" >> $GITHUB_OUTPUT
+              echo "KERNEL_VERSION=4.19" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "CPU=sm8250" >> $GITHUB_OUTPUT
+              echo "CPUD=kona" >> $GITHUB_OUTPUT
+              echo "ANDROID_VERSION=13" >> $GITHUB_OUTPUT
+              echo "KERNEL_VERSION=4.19" >> $GITHUB_OUTPUT
+              ;;
+          esac
 
   build:
     needs: get-config
     runs-on: ubuntu-latest
     env:
       CPU: ${{ needs.get-config.outputs.CPU }}
-      ANDROID_VERSION: ${{ needs.get-config.outputs.ANDROID_VERSION }} # 自动获取
+      CPUD: ${{ needs.get-config.outputs.CPUD }}
+      ANDROID_VERSION: ${{ needs.get-config.outputs.ANDROID_VERSION }}
       KERNEL_VERSION: ${{ needs.get-config.outputs.KERNEL_VERSION }}
-      CCACHE_MAXSIZE: 4G
-
-    steps:
-      # ... [保留基础步骤] ...
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      CCACHE_DIR: /home/runner/.ccache
+      CCACHE_MAXSIZE: 8G
       
-      # 核心修改：SUSFS 集成
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo swapoff -a || true
+          rm -rf /swapfile || true
+          rm -rf kernel_workspace || true
+          rm -rf AnyKernel3 || true
+          mkdir kernel_workspace
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Create and enable 6G swap
+        run: |
+          sudo fallocate -l 6G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Show selected inputs debug
+        run: |
+          echo "Selected CPU: ${{ needs.get-config.outputs.CPU }}"
+          echo "Selected FEIL: ${{ inputs.FEIL }}"
+          echo "Selected CPUD: ${{ needs.get-config.outputs.CPUD }}"
+          echo "Selected ANDROID_VERSION: ${{ needs.get-config.outputs.ANDROID_VERSION }}"
+          echo "Selected KERNEL_VERSION: ${{ needs.get-config.outputs.KERNEL_VERSION }}"
+          echo "Selected BUILD_METHOD: ${{ inputs.BUILD_METHOD }}"
+          echo "Custom SUFFIX: ${{ inputs.SUFFIX }}"
+          echo "Selected SUSFS_CI: ${{ inputs.SUSFS_CI }}"
+          echo "Selected VFS: ${{ inputs.VFS }}"
+
+      - name: Install dependencies
+        run: |
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y python3 git curl ccache jq
+
+      - name: Install repo tool
+        run: |
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+          chmod a+x ~/repo
+          sudo mv ~/repo /usr/local/bin/repo
+
+      - name: Initialize repo and sync
+        run: |
+          cd kernel_workspace
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ needs.get-config.outputs.CPU }} -m ${{ inputs.FEIL }}.xml --depth=1
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
+
+      # 添加 SukiSU Ultra
       - name: Add KernelSU-SukiSU Ultra
         run: |
           cd kernel_workspace/kernel_platform
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
           cd ./KernelSU
-          KSU_VERSION=$(expr $(git rev-list --count main) "+" 10700)
+          KSU_VERSION=$(expr $(git rev-list --count HEAD) "+" 10700)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
 
+      # 应用SUSFS补丁 (4.19专用)
       - name: Apply SUSFS Patches
         run: |
           cd kernel_workspace
-          # 使用自动获取的 ANDROID_VERSION
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ env.ANDROID_VERSION }}-4.19
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}
+          cd kernel_platform
+          echo "正在打susfs补丁"
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}.patch ./common/
+          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           
-          cd kernel_platform/common
-          patch -p1 < ../susfs4ksu/patches/50_add_susfs.patch
+          cd ./common
+          patch -p1 < 50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}.patch || true
+          echo "susfs_patch完成"
 
-      - name: Configure Kernel
+      # 应用手动钩子补丁
+      - name: Apply Manual Hook Patch
+        if: ${{ inputs.VFS == true }}
         run: |
-          CONFIG_FILE="arch/arm64/configs/gki_defconfig"
-          echo "CONFIG_KSU=y" >> $CONFIG_FILE
-          
-          if ${{ inputs.VFS }}; then
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> $CONFIG_FILE
-            echo "CONFIG_KSU_SUSFS=y" >> $CONFIG_FILE
-          fi
+          cd kernel_workspace
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          cd kernel_platform/common
+          cp ../../../SukiSU_patch/hooks/syscall_hooks.patch ./
+          patch -p1 < syscall_hooks.patch
 
-      # 构建步骤
-      - name: Build Kernel
+      # 配置信息
+      - name: Add Configuration Settings
         run: |
           cd kernel_workspace/kernel_platform
-          ./build.sh ${{ inputs.BUILD_METHOD }}
+          CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
+          
+          # SukiSU核心配置
+          echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+          
+          # VFS配置
+          if [ "${{ inputs.VFS }}" = "true" ]; then
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+          else
+            echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
+          fi
+          
+          # 移除构建校验
+          sed -i 's/check_defconfig//' ./common/build.config.gki
 
-      # ... [其他步骤保持不变] ...
+      # 构建内核
+      - name: Build Kernel
+        run: |
+          cd kernel_workspace
+          ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ needs.get-config.outputs.CPUD }} ${{ inputs.BUILD_METHOD }}
+
+      - name: Make AnyKernel3
+        run: |
+          git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+          
+          # 查找内核镜像
+          image_path=$(find "kernel_workspace/kernel_platform/out/" -name "Image" | head -n 1)
+          if [ -n "$image_path" ]; then
+            cp "$image_path" ./AnyKernel3/Image
+          else
+            echo "未找到 Image 文件，构建失败" >&2
+            exit 1
+          fi
+
+      # 下载 SUSFS 模块
+      - name: Download SUSFS Module
+        if: ${{ inputs.SUSFS_CI != 'NoN' }}
+        run: |
+          cd AnyKernel3
+          if [ "${{ inputs.SUSFS_CI }}" = "CI" ]; then
+            # CI 方式下载
+            LATEST_RUN_ID=$(curl -s https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs | jq -r '.workflow_runs[0].id')
+            curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://github.com/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" -o susfs_module.zip
+          else
+            # Release 方式下载
+            wget https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip -O susfs_module.zip
+          fi
+
+      - name: Download SukiSU Manager
+        run: |
+          cd AnyKernel3
+          wget https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/latest/download/sukisu-manager.apk
+
+      # 设置 ZIP 后缀
+      - name: Set zip suffix
+        id: suffix
+        run: |
+          echo "value=${{ inputs.VFS == true && '_VFS' || '' }}" >> $GITHUB_OUTPUT
+
+      # 上传最终包
+      - name: Upload AnyKernel3
+        uses: actions/upload-artifact@v4
+        with:
+          name: SukiSU-4.19-${{ env.KSUVER }}${{ steps.suffix.outputs.value }}
+          path: ./AnyKernel3/*
