@@ -25,8 +25,9 @@ jobs:
           find . -name gcc-wrapper.py -exec sed -i "s/print \(.*\)$/print(\1)/" {} +
       - name: Fix python2/3 bytes-str rstrip in gcc-wrapper.py
         run: |
-          find . -name gcc-wrapper.py -exec sed -i -E "s/^([[:space:]]*)line[[:space:]]*=[[:space:]]*line\\.rstrip\('\\n'\)[[:space:]]*$/\1line = line.rstrip(b'\\n') if isinstance(line, bytes) else line.rstrip('\\n')/" {} +
+          find . -name gcc-wrapper.py -exec sed -i -E "s/^([[:space:]]*)line[[:space:]]*=[[:space:]]*line\\.rstrip\([bB]?'\\n'?\)[[:space:]]*$/\1line = line.rstrip(b'\\n') if isinstance(line, bytes) else line.rstrip('\\n')/" {} +
           find . -name gcc-wrapper.py -exec grep "rstrip" {} +
+          find . -name gcc-wrapper.py -exec cat {} +
       - name: Integrate SukiSU (with susfs)
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
