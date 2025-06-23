@@ -21,6 +21,10 @@ jobs:
           git clone https://github.com/lateautumn233/AnyKernel3 -b master --depth=1
           rm -rf AnyKernel3/.git
 
+      - name: Fix python2 print to python3
+        run: |
+          find . -name gcc-wrapper.py -exec sed -i "s/print \(.*\)$/print(\1)/" {} +
+
       - name: Integrate SukiSU (with susfs)
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
