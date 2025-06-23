@@ -2,83 +2,219 @@ name: Build OnePlus_SukiSU Ultra All
 on:
   workflow_dispatch:
     inputs:
-      # ...（保持输入参数不变）
-      # 移除KPM和ZRAM选项（不再需要）
-      # 保留其他选项
+      FEIL:
+        type: choice
+        description: "配置文件"
+        required: true
+        default: oneplus_ace2_pro_v
+        options:
+          # ...保留原有的设备选项...
+      BUILD_METHOD:
+        type: choice
+        description: "编译方式"
+        required: true
+        default: gki
+        options:
+          - gki
+          - perf
+      SUSFS_CI:
+        type: choice
+        description: "下载SUSFS模块调用方式"
+        required: true
+        default: CI
+        options:
+          - CI
+          - Release
+          - NoN
+      SUFFIX:
+        type: string
+        description: "自定义内核后缀"
+        required: false
+        default: ""
+      FAST_BUILD:
+        type: boolean
+        description: "是否启用极速构建？"
+        required: true
+        default: true
+      VFS:
+        type: boolean
+        description: "是否启用手动钩子(VFS)？"
+        required: true
+        default: true
 
 jobs:
   get-config:
-    # ...（保持不变）
+    uses: ./.github/workflows/feil-map.yml
+    with:
+      FEIL: ${{ inputs.FEIL }}
+    secrets: inherit
 
   build:
-    # ...（环境变量保持不变）
-    
+    needs: get-config
+    name: ${{ github.event.inputs.FAST_BUILD == 'true' && ' [FAST]' || '' }}For ${{ github.event.inputs.FEIL }} ${{ github.event.inputs.BUILD_METHOD }} ${{ github.event.inputs.SUFFIX }}
+    runs-on: ubuntu-latest
+    env:
+      CPU: ${{ needs.get-config.outputs.CPU }}
+      CPUD: ${{ needs.get-config.outputs.CPUD }}
+      ANDROID_VERSION: ${{ needs.get-config.outputs.ANDROID_VERSION }}
+      KERNEL_VERSION: ${{ needs.get-config.outputs.KERNEL_VERSION }}
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      CCACHE_DIR: /home/runner/.ccache  
+      CCACHE_MAXSIZE: 8G
     steps:
-      ## === 删除不需要的步骤 ===
-      # 移除ZRAM相关步骤
-      # - name: Apply ZRAM
-      # 移除KPM相关步骤
-      # - name: Apply patch_linux and replace Image
-      # 移除风驰内核支持
-      # - name: Add sched_ext
-      # 移除GKI专用优化
-      # - name: Enable lto=thin For FAST
-      # 移除ZRAM下载
-      # - name: Download And Unzip ZRAM
-      # - name: Upload ZRAM Module
+      - name: Clean workspace
+        run: |
+          sudo swapoff -a || true
+          rm -rf /swapfile || true
+          rm -rf kernel_workspace || true
+          rm -rf AnyKernel3 || true
+          git config --global --add safe.directory '*'
+          
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      ## === 保留SUSFS集成 ===
-      # 添加SukiSU Ultra
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Create and enable 6G swap
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 6G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Install dependencies
+        run: |
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y python3 git curl ccache jq
+
+      - name: Restore ccache
+        uses: actions/cache@v3
+        with:
+          path: /home/runner/.ccache
+          key: ccache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Install repo tool
+        run: |
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+          chmod a+x ~/repo
+          sudo mv ~/repo /usr/local/bin/repo
+
+      - name: Initialize repo and sync
+        run: |
+          mkdir kernel_workspace && cd kernel_workspace
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ needs.get-config.outputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
+          
+          # 移除保护导出列表
+          find ./kernel_platform -name "BUILD.bazel" -exec sed -i '/protected_exports_list/d' {} \;
+          rm -f ./kernel_platform/common/android/abi_gki_protected_exports_*
+          rm -f ./kernel_platform/msm-kernel/android/abi_gki_protected_exports_*
+
+      # 自定义内核后缀
+      - name: Modify setlocalversion suffix
+        run: |
+          cd kernel_workspace
+          ANDROID_VERSION="${{ needs.get-config.outputs.ANDROID_VERSION }}"
+          FAST_BUILD="${{ github.event.inputs.FAST_BUILD }}"
+          
+          # 设置后缀（自定义或随机）
+          if [ -n "${{ github.event.inputs.SUFFIX }}" ]; then
+            SUFFIX="${{ github.event.inputs.SUFFIX }}"
+          else
+            RANDOM_DIGIT=$(shuf -i 0-10 -n 1)
+            RANDOM_HASH=$(openssl rand -hex 4)
+            SUFFIX="${RANDOM_DIGIT}-o-g${RANDOM_HASH}"
+          fi
+          
+          # 修改所有setlocalversion文件
+          find . -name "setlocalversion" | while read file; do
+            echo "Modifying: $file"
+            # 删除-dirty标记
+            sed -i 's/ -dirty//g' "$file"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$file"
+            
+            # 添加自定义后缀
+            if grep -q 'echo "\$res"' "$file"; then
+              sed -i "s|echo \"\\\$res\"|echo \"\\\$res-$SUFFIX\"|" "$file"
+            else
+              echo "echo \"\$res-$SUFFIX\"" >> "$file"
+            fi
+            chmod +x "$file"
+          done
+          
+          git add -A
+          git commit -m "Custom suffix & removed -dirty"
+
+      - name: Download kernel-manifest
+        run: |
+          feil="${{ github.event.inputs.FEIL }}"
+          cpu="${{ needs.get-config.outputs.CPU }}"
+          mkdir -p .repo/manifests_fallback
+          echo "Downloading manifest $feil.xml..."
+          curl -LO --retry 5 "https://raw.githubusercontent.com/OnePlusOSS/kernel_manifest/oneplus/$cpu/$feil.xml"
+          mv "$feil.xml" ".repo/manifests_fallback/${feil}.xml"
+
+      # 添加 SukiSU Ultra
       - name: Add KernelSU-SukiSU Ultra
         run: |
           cd kernel_workspace/kernel_platform
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
           cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10700)
+          KSU_VERSION=$(expr $(git rev-list --count HEAD) "+" 10700)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          export KSU_VERSION=$KSU_VERSION
           sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
 
-      # 应用SUSFS补丁
-      - name: Apply Patches SukiSU Ultra
+      - name: Apply SUSFS Patches
         run: |
           cd kernel_workspace
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}
           cd kernel_platform
-          echo "正在打susfs补丁"
+          
+          # 应用SUSFS补丁
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}.patch ./common/
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-
+          
           cd ./common
-          KERNEL_VERSION="${{ needs.get-config.outputs.KERNEL_VERSION }}"
-          feil="${{ github.event.inputs.FEIL }}"
-          TRUSTY_EXISTS="false"
-          if [[ "$KERNEL_VERSION" == "6.6" ]]; then
-            if grep -qr 'common-modules/trusty' "$GITHUB_WORKSPACE/.repo/manifests_fallback/${feil}.xml"; then
-              TRUSTY_EXISTS="true"
-            fi
-            echo "trusty_exists=$TRUSTY_EXISTS" >> $GITHUB_OUTPUT
-
-            if [[ "$TRUSTY_EXISTS" == "false" ]]; then
-              echo "修复内核版本6.6部分机型susfs的问题"
-              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${KERNEL_VERSION}.patch
-              sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${KERNEL_VERSION}.patch
-            fi
-          fi
           patch -p1 < 50_add_susfs_in_gki-${{ needs.get-config.outputs.ANDROID_VERSION }}-${{ needs.get-config.outputs.KERNEL_VERSION }}.patch || true
-          echo "susfs_patch完成"
 
-      # 简化配置设置
+      - name: Apply VFS
+        if: ${{ github.event.inputs.VFS == 'true' }}
+        run: |
+          cd kernel_workspace/kernel_platform/common
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          cp SukiSU_patch/hooks/syscall_hooks.patch ./
+          patch -p1 < syscall_hooks.patch
+
+      # 配置信息
       - name: Add Configuration Settings
         run: |
           cd kernel_workspace/kernel_platform
           CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
           KERNEL_VERSION="${{ needs.get-config.outputs.KERNEL_VERSION }}"
 
-          # SukiSU Ultra核心配置
+          # SukiSU Ultra配置
           echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-          
+
           # VFS配置
           if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
@@ -87,59 +223,73 @@ jobs:
           fi
 
           # SUSFS配置
-          if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
-            echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
-          fi
+          echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
           
           # 移除构建校验
-          sed -i 's/check_defconfig//' ./common/build.config.gki
+          find ./common -name "build.config.*" -exec sed -i 's/check_defconfig//' {} \;
 
-      # 构建内核（简化版）
       - name: Build Kernel
         if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
         run: |
-          # ...（保留构建逻辑，移除优化相关部分）
           cd kernel_workspace/kernel_platform/common
-          make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
-          make -j$(nproc --all) O=out $MAKE_ARGS
+          
+          # 设置编译环境
+          export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86/clang-r*/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+          
+          make O=out gki_defconfig
+          make -j$(nproc --all) O=out
 
       - name: Fallback Build Kernel
         if: ${{ github.event.inputs.FAST_BUILD == 'false' }}
         run: |
           cd kernel_workspace
           ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ needs.get-config.outputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
-          
-      ## === SUSFS模块处理 ===
-      # 下载SUSFS模块（CI）
-      - name: Download Latest SUSFS Module from CI
-        if: ${{ github.event.inputs.SUSFS_CI == 'CI' }}
-        continue-on-error: true
-        run: |
-          # ...（保持原有逻辑）
-          
-      # 下载SUSFS模块（Release）
-      - name: Download Latest SUSFS Module from Release
-        if: ${{ github.event.inputs.SUSFS_CI == 'Release' }}
-        continue-on-error: true
-        run: |
-          wget -O ksu_module_susfs_1.5.2+_Release.zip https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip
-          cp ksu_module_susfs_1.5.2+_Release.zip ./AnyKernel3/
 
-      # 简化zip后缀
-      - name: Set zip suffix
-        id: suffix
+      - name: Prepare AnyKernel3
         run: |
-          echo "value=${{ github.event.inputs.VFS == 'true' && '_VFS' || '' }}" >> $GITHUB_OUTPUT
+          git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+          
+          # 查找内核镜像
+          if [ -f "./kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image" ]; then
+            cp ./kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image ./AnyKernel3/
+          elif [ -f "./kernel_workspace/kernel_platform/out/Image" ]; then
+            cp ./kernel_workspace/kernel_platform/out/Image ./AnyKernel3/
+          else
+            echo "::error::未找到内核镜像文件"
+            exit 1
+          fi
 
-      # 上传最终包
-      - name: Upload AnyKernel3
+      # 下载 SUSFS 模块
+      - name: Download SUSFS Module
+        if: ${{ github.event.inputs.SUSFS_CI != 'NoN' }}
+        run: |
+          cd AnyKernel3
+          
+          if [ "${{ github.event.inputs.SUSFS_CI }}" = "CI" ]; then
+            # 从GitHub Releases下载
+            LATEST_URL=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest | jq -r '.assets[0].browser_download_url')
+            if [ -n "$LATEST_URL" ]; then
+              wget "$LATEST_URL" -O susfs_module.zip
+            else
+              echo "::warning::无法获取SUSFS模块URL，使用备用地址"
+              wget https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip -O susfs_module.zip
+            fi
+          else
+            wget https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip -O susfs_module.zip
+          fi
+          
+          # 解压模块
+          unzip susfs_module.zip -d modules
+          rm susfs_module.zip
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3_SukiSUUltra_${{ env.KSUVER }}_${{ steps.feil_clean.outputs.value }}${{ steps.suffix.outputs.value }}
+          name: SukiSU_Kernel_${{ env.KSUVER }}_${{ github.event.inputs.FEIL }}
           path: ./AnyKernel3/*
